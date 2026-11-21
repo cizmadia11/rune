@@ -2,7 +2,12 @@
 use rune::{AppSpec, Color, Cx, El, Family, TextStyle, col, row, text};
 
 fn view(_: &(), _: &mut Cx<()>) -> El {
-    let mut page = col().w_full().h_full().padding(16.0).gap(0.0).fill(Color::BLACK);
+    let mut page = col()
+        .w_full()
+        .h_full()
+        .padding(16.0)
+        .gap(0.0)
+        .fill(Color::BLACK);
     let cases = [
         ("h1", 24.0, 600.0, false, "Segoe UI Variable Text"),
         ("h2", 21.0, 600.0, false, "Segoe UI Variable Text"),
@@ -12,13 +17,38 @@ fn view(_: &(), _: &mut Cx<()>) -> El {
         ("body", 17.5, 400.0, false, "Cambria"),
         ("title", 13.5, 600.0, false, "Segoe UI Variable Text"),
         ("toolbar", 12.5, 500.0, false, "Segoe UI Variable Text"),
-        ("properties", 13.5, 600.0, false, "Segoe UI Variable Text"),
+        (
+            "properties-header",
+            11.0,
+            400.0,
+            false,
+            "Segoe UI Variable Text",
+        ),
+        (
+            "properties-key",
+            11.5,
+            500.0,
+            false,
+            "Segoe UI Variable Text",
+        ),
         ("palette", 13.0, 500.0, false, "Segoe UI Variable Text"),
         ("inter", 13.0, 500.0, false, "Inter"),
     ];
     for (name, size, weight, italic, family) in cases {
-        for (index, suffix) in ["'cafe' - ...", "’cafe' - ...", "“cafe” - ...", "'cafe' — ...", "'cafe' - …", "'café' - ..."].iter().enumerate() {
-            let mut style = TextStyle::new(size, weight).lh(32.0).family(Family::Named(family));
+        for (index, suffix) in [
+            "'cafe' - ...",
+            "’cafe' - ...",
+            "“cafe” - ...",
+            "'cafe' — ...",
+            "'cafe' - …",
+            "'café' - ...",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut style = TextStyle::new(size, weight)
+                .lh(32.0)
+                .family(Family::Named(family));
             if italic {
                 style = style.italic();
             }
@@ -48,15 +78,22 @@ mod tests {
         let unicode = system.layout_rich("Sample motion …", &[], style, 1.0, None);
         let a = ascii.lines().next().unwrap().runs().next().unwrap();
         let b = unicode.lines().next().unwrap().runs().next().unwrap();
-        assert_eq!((a.font().data.id(), a.font().index), (b.font().data.id(), b.font().index),
-                   "punctuation must not change the system face for shared ASCII text");
-        assert_eq!(a.normalized_coords(), b.normalized_coords(), "variation coordinates must agree");
+        assert_eq!(
+            (a.font().data.id(), a.font().index),
+            (b.font().data.id(), b.font().index),
+            "punctuation must not change the system face for shared ASCII text"
+        );
+        assert_eq!(
+            a.normalized_coords(),
+            b.normalized_coords(),
+            "variation coordinates must agree"
+        );
     }
 }
 
 fn main() {
     rune::run(AppSpec {
         families: ("Segoe UI", "Consolas"),
-        ..AppSpec::new("Text weight reproduction", (600.0, 2160.0), || (), view)
+        ..AppSpec::new("Text weight reproduction", (600.0, 2336.0), || (), view)
     });
 }
