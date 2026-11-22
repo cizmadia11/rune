@@ -58,7 +58,8 @@ fn unidentified_text_respects_focus_and_ime_commit() {
     rt.frame(0.0);
     assert!(rt.state.edit.text.is_empty());
     let mut rt = focused();
-    rt.ime(Ime::Preedit("に".into(), Some((0, 3))));
+    // This base also carries IME clauses; use an empty clause list for this text-routing test.
+    rt.ime(Ime::Preedit("に".into(), Some((0, 3)), Vec::new()));
     rt.ime(Ime::Commit("日本".into()));
     rt.key(packet(Some("é"), ModifiersState::empty()).unwrap());
     rt.frame(0.0);
