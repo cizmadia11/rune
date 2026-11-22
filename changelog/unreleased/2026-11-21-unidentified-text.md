@@ -1,0 +1,1 @@
+- Preserve text from unidentified native key events, including Windows Unicode packet input used by text expanders and dictation, while retaining shortcut, named-key and dead-key routing.

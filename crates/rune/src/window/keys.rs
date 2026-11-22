@@ -77,7 +77,7 @@ pub(crate) fn map_key(key: &WKey, m: ModifiersState) -> Option<KeyEvent> {
 /// follow the key's Latin virtual key and macOS's switch to a Latin layout under ⌘: Ctrl+V
 /// pastes on every layout.
 pub(crate) fn map_key_event(event: &winit::event::KeyEvent, m: ModifiersState) -> Option<KeyEvent> {
-    let mut ev = map_key(&event.logical_key, m).or_else(|| unidentified(event, m))?;
+    let mut ev = map_key_text(&event.logical_key, event.text.as_deref(), m).or_else(|| unidentified(event, m))?;
     if !cfg!(target_os = "macos")
         && let Key::Command(c) = ev.key
         && !c.is_ascii()
@@ -87,6 +87,18 @@ pub(crate) fn map_key_event(event: &winit::event::KeyEvent, m: ModifiersState) -
         ev.key = Key::Command(us);
     }
     Some(ev)
+}
+
+// winit's event has private platform fields. Keep its public logical key and text together
+// here so translation can be tested without fabricating platform internals.
+fn map_key_text(key: &WKey, text: Option<&str>, m: ModifiersState) -> Option<KeyEvent> {
+    map_key(key, m).or_else(|| {
+        if !matches!(key, WKey::Unidentified(_)) { return None; }
+        let mods = map_mods(m);
+        if mods.cmd || mods.ctrl || mods.logo { return None; }
+        let text = text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control))?;
+        Some(KeyEvent { key: Key::Text(text.to_owned()), mods })
+    })
 }
 
 fn unidentified(event: &winit::event::KeyEvent, m: ModifiersState) -> Option<KeyEvent> {
@@ -132,3 +144,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "keys_text_tests.rs"]
+mod text_tests;
