@@ -55,6 +55,7 @@ fn unidentified_text_respects_focus_and_ime_commit() {
     let mut rt = Runtime::new(Field::default(), field, (240.0, 40.0), Env::new(true, 1.0));
     rt.frame(0.0);
     rt.key(packet(Some("unfocused"), ModifiersState::empty()).unwrap());
+    rt.frame(0.0);
     assert!(rt.state.edit.text.is_empty());
     let mut rt = focused();
     rt.ime(Ime::Preedit("に".into(), Some((0, 3))));
