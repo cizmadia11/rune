@@ -96,7 +96,8 @@ fn map_key_text(key: &WKey, text: Option<&str>, m: ModifiersState) -> Option<Key
         if !matches!(key, WKey::Unidentified(_)) { return None; }
         let mods = map_mods(m);
         if mods.cmd || mods.ctrl || mods.logo { return None; }
-        let text = text.filter(|t| !t.is_empty() && !t.chars().any(char::is_control))?;
+        let text = text.filter(|t| !t.is_empty()
+            && t.chars().all(|c| !c.is_control() || matches!(c, '\r' | '\n' | '\t')))?;
         Some(KeyEvent { key: Key::Text(text.to_owned()), mods })
     })
 }

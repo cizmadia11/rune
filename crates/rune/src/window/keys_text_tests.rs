@@ -39,7 +39,7 @@ fn unidentified_text_reaches_the_focused_field() {
 
 #[test]
 fn unidentified_text_does_not_invent_shortcuts_or_control_keys() {
-    for text in [None, Some(""), Some("\r"), Some("\t"), Some("\u{1b}")] {
+    for text in [None, Some(""), Some("\u{8}"), Some("\u{1b}")] {
         assert!(packet(text, ModifiersState::empty()).is_none());
     }
     for mods in [ModifiersState::CONTROL, ModifiersState::SUPER, ModifiersState::CONTROL | ModifiersState::ALT] {
@@ -63,4 +63,13 @@ fn unidentified_text_respects_focus_and_ime_commit() {
     rt.key(packet(Some("é"), ModifiersState::empty()).unwrap());
     rt.frame(0.0);
     assert_eq!(rt.state.edit.text, "日本é");
+}
+
+#[test]
+fn unidentified_expansions_retain_line_breaks_and_tabs() {
+    let mut rt = focused();
+    rt.key(packet(Some("first\r\nsecond\tcolumn"), ModifiersState::empty()).unwrap());
+    rt.frame(0.0);
+    assert_eq!(rt.state.edit.text, "first\nsecond\tcolumn");
+    assert_eq!(packet(Some("\n"), ModifiersState::empty()).unwrap().key, Key::Text("\n".into()));
 }
