@@ -5,8 +5,9 @@
 use std::cell::RefCell;
 
 use accesskit_windows::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::WM_GETOBJECT;
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_ACTIVATEAPP, WM_GETOBJECT, WM_KILLFOCUS, WM_SETFOCUS};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{Actions, Activation};
@@ -37,33 +38,42 @@ unsafe extern "system" fn subclass(hwnd: windows_sys::Win32::Foundation::HWND, m
             });
             if let Some(result) = result { return result.0; }
         }
+        WM_SETFOCUS | WM_KILLFOCUS | WM_ACTIVATEAPP => {
+            // A background thread can retain its active/focus window. When the process
+            // returns, Windows can send WM_ACTIVATEAPP without a new WM_SETFOCUS.
+            let focused = message != WM_KILLFOCUS && (message != WM_ACTIVATEAPP || wparam != 0) && window_focused(hwnd);
+            update_focus(state, focused);
+        }
         _ => {}
     }
     // SAFETY: forwarding the message this subclass received.
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
+/// A focus notification can synchronously reenter WM_GETOBJECT: release the borrow first.
+fn update_focus(state: &RefCell<State>, focused: bool) {
+    let events = state.try_borrow_mut().ok().and_then(|mut s| s.adapter.update_window_focus_state(focused));
+    if let Some(events) = events { events.raise(); }
+}
+
+/// Native keyboard focus is local to an input queue; UIA keyboard focus is global.
+/// Called on the window's owner thread, including its subclass callback.
+fn window_focused(hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
+    // SAFETY: both APIs only read state; GetFocus reads this thread's input queue.
+    unsafe { GetForegroundWindow() == hwnd && GetFocus() == hwnd }
+}
+
 impl Adapter {
     pub(super) fn new(window: &winit::window::Window, activation: Activation, actions: Actions) -> Option<Self> {
         let RawWindowHandle::Win32(h) = window.window_handle().ok()?.as_raw() else { return None };
         let hwnd = h.hwnd.get();
-        // winit combines native keyboard focus with activation. A background thread can
-        // retain keyboard focus, and activation need not send another WM_SETFOCUS.
-        let focused = window.has_focus();
+        let focused = window_focused(hwnd as _);
         let adapter = accesskit_windows::Adapter::new(HWND(hwnd as *mut _), focused, actions);
         let state = Box::new(RefCell::new(State { adapter, activation }));
         // SAFETY: the window is live and owned by this thread; `state` outlives the subclass,
         // which `Drop` removes first.
         let ok = unsafe { SetWindowSubclass(hwnd as _, Some(subclass), SUBCLASS_ID, &*state as *const RefCell<State> as usize) };
         (ok != 0).then_some(Adapter { hwnd, state })
-    }
-
-    /// Use the same active-focus transitions as Rune's input host. Listening only for
-    /// WM_SETFOCUS misses activation of a background window that retained thread focus.
-    pub(super) fn focus(&mut self, focused: bool) {
-        let events = self.state.borrow_mut().adapter.update_window_focus_state(focused);
-        // Raising can reenter WM_GETOBJECT; the mutable borrow has already ended.
-        if let Some(events) = events { events.raise(); }
     }
 
     /// Announces what UIA events from AccessKit don't: children added, removed or reordered
@@ -81,6 +91,8 @@ impl Adapter {
 
     pub(super) fn update(&mut self, update: accesskit::TreeUpdate) {
         // Raised after the borrow ends: raising may bring a nested WM_GETOBJECT.
+        // Reconcile after any nested native message that could not borrow the adapter.
+        update_focus(&self.state, window_focused(self.hwnd as _));
         let events = self.state.try_borrow_mut().ok().and_then(|mut s| s.adapter.update_if_active(|| update));
         if let Some(events) = events { events.raise(); }
     }

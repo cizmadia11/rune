@@ -1,27 +1,32 @@
 # Windows active keyboard focus (Gold S11)
 
 Branch `gold-window-a11y-6ce2b837`, based on Gold's existing fork revision
-`6ce2b8375a5e1755ac8b11af5f17c4b9b86260c5`. Do not change the existing input-fix
-branches or `dev`.
+`6ce2b8375a5e1755ac8b11af5f17c4b9b86260c5`. Existing input-fix branches and
+`dev` are unchanged. Publication requires the consumer lead's explicit clearance.
 
-Windows keeps a thread's keyboard-focus window separately from activation. A
-window created in the background can retain keyboard focus; bringing it forward
-can produce WM_NCACTIVATE without another WM_SETFOCUS. winit 0.30.13 tracks both
-states and emits WindowEvent::Focused when their conjunction changes. Rune's
-Windows accessibility adapter formerly ignored that event and listened only for
-WM_SETFOCUS/WM_KILLFOCUS, leaving AccessKit's host-focus flag stale.
+Windows keeps a thread's active and keyboard-focus windows even while another
+process is foreground. Bringing the process forward can produce WM_ACTIVATEAPP
+without another WM_SETFOCUS. Rune's adapter listened only for WM_SETFOCUS and
+WM_KILLFOCUS, leaving AccessKit's host-focus flag stale after this first activation.
 
-Use winit's combined focus at adapter creation and forward the same host focus
-events the input runtime consumes. Remove the competing native-focus listener so
-an inactive window retaining keyboard focus cannot be reported focused. Raise
-AccessKit's queued events after releasing the RefCell borrow, allowing nested
-WM_GETOBJECT. The subclass still handles UI Automation's provider requests.
+Handle process activation as well as native keyboard-focus messages, reading
+both the real foreground HWND and this thread's GetFocus HWND. Reconcile those
+readings at tree-update time, so a nested message that could not borrow the
+adapter cannot leave a stale focus flag. Raise queued focus events after the
+RefCell borrow ends and before applying tree changes.
 
-Gold's native fail-first and confirmation live in
-`ui-rune/scripts/Prove-WindowAccessibility.ps1`, mode `window-a11y-focus`. It opens
-Gold behind a proof-owned foreground window, reads thread active/focus handles,
-activates once, and requires HasKeyboardFocus plus literal UIA SetValue without
-minimize/restore or focus reacquisition. Native qualification is pending.
+Forwarding winit's Focused events alone was investigated in local commit
+b557d28b; winit's is_active/is_focused state is local to the input queue and does
+not establish foreground ownership. That approach is superseded, preserving
+history and the preexisting native focus integration.
+
+Gold's native regression is `ui-rune/scripts/Prove-WindowAccessibility.ps1`,
+mode `window-a11y-focus`. It sets a literal field value and runtime focus while
+Gold stays behind a proof-owned foreground window, requires UIA focus to remain
+false, activates Gold once, and requires HasKeyboardFocus plus another exact
+literal UIA value without minimize/restore or focus reacquisition. Original
+6ce2b837 fails its first-activation assertion (`s11-w1-focus-failfirst-1`).
 
 This restores expected native focus reporting; no deliberate product divergence
-from Original is intended. No public publication is authorized by this file.
+from Original is intended. Gold's handoff records qualifications and remaining
+startup/header findings; those are separate from this framework fix.
