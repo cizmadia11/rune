@@ -185,10 +185,10 @@ impl Adapter {
         self.inner.update(update);
     }
 
-    /// The window gained or lost key focus. Windows tracks it from the window's own messages.
+    /// The window gained or lost active keyboard focus, as reported by the host.
     #[allow(unused_variables)]
     pub(crate) fn focus(&mut self, focused: bool) {
-        #[cfg(all(feature = "accessibility", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(feature = "accessibility", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         self.inner.focus(focused);
     }
 

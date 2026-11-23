@@ -6,7 +6,7 @@ use std::cell::RefCell;
 
 use accesskit_windows::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, WM_GETOBJECT, WM_KILLFOCUS, WM_SETFOCUS};
+use windows_sys::Win32::UI::WindowsAndMessaging::WM_GETOBJECT;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::{Actions, Activation};
@@ -37,10 +37,6 @@ unsafe extern "system" fn subclass(hwnd: windows_sys::Win32::Foundation::HWND, m
             });
             if let Some(result) = result { return result.0; }
         }
-        WM_SETFOCUS | WM_KILLFOCUS => {
-            let events = state.try_borrow_mut().ok().and_then(|mut s| s.adapter.update_window_focus_state(message == WM_SETFOCUS));
-            if let Some(events) = events { events.raise(); }
-        }
         _ => {}
     }
     // SAFETY: forwarding the message this subclass received.
@@ -51,14 +47,23 @@ impl Adapter {
     pub(super) fn new(window: &winit::window::Window, activation: Activation, actions: Actions) -> Option<Self> {
         let RawWindowHandle::Win32(h) = window.window_handle().ok()?.as_raw() else { return None };
         let hwnd = h.hwnd.get();
-        // SAFETY: reads which window has focus; `hwnd` belongs to this thread.
-        let focused = unsafe { GetForegroundWindow() } as isize == hwnd;
+        // winit combines native keyboard focus with activation. A background thread can
+        // retain keyboard focus, and activation need not send another WM_SETFOCUS.
+        let focused = window.has_focus();
         let adapter = accesskit_windows::Adapter::new(HWND(hwnd as *mut _), focused, actions);
         let state = Box::new(RefCell::new(State { adapter, activation }));
         // SAFETY: the window is live and owned by this thread; `state` outlives the subclass,
         // which `Drop` removes first.
         let ok = unsafe { SetWindowSubclass(hwnd as _, Some(subclass), SUBCLASS_ID, &*state as *const RefCell<State> as usize) };
         (ok != 0).then_some(Adapter { hwnd, state })
+    }
+
+    /// Use the same active-focus transitions as Rune's input host. Listening only for
+    /// WM_SETFOCUS misses activation of a background window that retained thread focus.
+    pub(super) fn focus(&mut self, focused: bool) {
+        let events = self.state.borrow_mut().adapter.update_window_focus_state(focused);
+        // Raising can reenter WM_GETOBJECT; the mutable borrow has already ended.
+        if let Some(events) = events { events.raise(); }
     }
 
     /// Announces what UIA events from AccessKit don't: children added, removed or reordered
