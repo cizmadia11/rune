@@ -21,11 +21,17 @@ not establish foreground ownership. That approach is superseded, preserving
 history and the preexisting native focus integration.
 
 Gold's native regression is `ui-rune/scripts/Prove-WindowAccessibility.ps1`,
-mode `window-a11y-focus`. It sets a literal field value and runtime focus while
-Gold stays behind a proof-owned foreground window, requires UIA focus to remain
-false, activates Gold once, and requires HasKeyboardFocus plus another exact
-literal UIA value without minimize/restore or focus reacquisition. Original
-6ce2b837 fails its first-activation assertion (`s11-w1-focus-failfirst-1`).
+mode `window-a11y-focus`. It opens behind a proof-owned foreground window,
+requires the background window and field to report no UIA keyboard focus,
+activates Gold once, and requires HasKeyboardFocus plus an exact literal UIA
+SetValue without minimize/restore or focus reacquisition. Literal entry happens
+after activation because managed UIA Focus and Value actions can activate a
+background window themselves.
+
+Original 6ce2b837 fails first activation (`s11-w1-focus-failfirst-1`, exit 1).
+The native confirmation (`s11-w1-focus-local-3`, Gold 99ffe9eb, exit 0) uses the
+exact 83550ef7 source archive and a SHA-256-guarded private Gold image: background
+focus false, first-activation focus true, exact literal value, no minimize/restore.
 
 This restores expected native focus reporting; no deliberate product divergence
 from Original is intended. Gold's handoff records qualifications and remaining
