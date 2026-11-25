@@ -7,8 +7,9 @@
 //! `Automatic` with a trackpad, and always on iOS). Dragging the thumb scrolls it, and pressing
 //! the track above or below pages toward the press, again and again while it's held, or jumps
 //! there under the "Click in the scroll bar to" preference ([`rune::system_scroller_jumps`];
-//! Option-click does the other). When the content grows or shrinks the thumb glides to its new
-//! length. All of it runs through live values, so scrolling never rebuilds the view.
+//! Option-click does the other). A wheel over the bar scrolls the viewport it follows, as a
+//! browser's scrollbar belongs to its scroller. When the content grows or shrinks the thumb glides
+//! to its new length. All of it runs through live values, so scrolling never rebuilds the view.
 //! [`ScrollBarStyle`] sets the thumb's colour and width, at rest and under the pointer.
 
 use std::cell::{Cell, RefCell};
@@ -372,6 +373,9 @@ struct Bar {
     near: Cell<bool>,
     /// The pointer is over the track.
     over: Cell<bool>,
+    /// The pointer is over the bar's own area (kept while content fits, so an area-revealed bar
+    /// shows as soon as the content overflows, as CSS `:hover::-webkit-scrollbar-thumb` does).
+    inside: Cell<bool>,
     /// The pointer is over the element marked [`ScrollBar::scroll_bar_hover`].
     target: Cell<bool>,
     /// The style the last view built the bar with; `None` until the first.
@@ -406,6 +410,7 @@ fn kept(area: &str) -> Rc<Bar> {
                     press: Cell::new(Grip::Idle),
                     near: Cell::new(false),
                     over: Cell::new(false),
+                    inside: Cell::new(false),
                     target: Cell::new(false),
                     style: Cell::new(None),
                     last_now: Cell::new(0.0),
@@ -650,9 +655,11 @@ impl Bar {
         self.reveal(|| self.near.set(near));
     }
 
-    /// Shown while the pointer is near its edge or over its hover target.
+    /// Shown while the pointer is near its edge, over its hover target, or over an area-revealed
+    /// bar's own area.
     fn revealed(&self) -> bool {
-        self.near.get() || self.target.get()
+        let t = self.style().track;
+        self.near.get() || self.target.get() || (self.inside.get() && t.area_reveals && !t.targeted && !t.scroll_only)
     }
 
     /// Runs `change`, then holds the bar up or lets it go if that showed or hid it.
@@ -664,6 +671,19 @@ impl Bar {
             (true, false) => self.let_go(),
             _ => {}
         }
+    }
+
+    /// The pointer entered or left the bar's own area.
+    fn area_hover(&self, inside: bool) {
+        if !inside && self.over.replace(false) {
+            self.widen();
+        }
+        self.reveal(|| {
+            self.inside.set(inside);
+            if !inside {
+                self.near.set(false);
+            }
+        });
     }
 
     /// The pointer entered or left the element marked [`ScrollBar::scroll_bar_hover`].
@@ -783,14 +803,18 @@ fn attach(style: ScrollBarStyle, area: &str, key: &str, outer: El, viewport: El)
     let bar = kept(area);
     bar.restyle(style);
     let target = format!("{area}/{key}");
-    let (watch, moved, left, drag) = (bar.clone(), bar.clone(), bar.clone(), bar.clone());
+    let (watch, moved, left, drag, follows) = (bar.clone(), bar.clone(), bar.clone(), bar.clone(), target.clone());
     let on_drag = move |d: &mut rune::Drag, tx: &mut rune::Tx| drag.drag(&target, jumps, d, tx);
     let slot = el().key("thumb-slot").absolute(0.0, 0.0).live_rect(bar.slot.smooth(style.track.tint)).child(
         el().key("thumb").absolute(0.0, 0.0).live_rect(bar.thumb.smooth(style.track.tint))
             .radius(style.widest() / 2.0).live_fill(bar.fill.smooth(style.track.tint)),
     );
+    // A wheel over the bar is the viewport's, the track standing beside it rather than in it, on
+    // either axis: a sideways wheel over a table's bar scrolls the table, and a vertical wheel
+    // over it chains on up from the table to the pane that holds it.
     let track = el().key("scroll-bar").absolute(0.0, 0.0).live_rect(&bar.track)
-        .live_opacity(bar.opacity.smooth(style.track.enter).rest(style.track.leave)).a11y_hidden();
+        .live_opacity(bar.opacity.smooth(style.track.enter).rest(style.track.leave)).a11y_hidden()
+        .wheel_scrolls(follows);
     // The transparent area beyond a ScrollView/MenuScroll thumb belongs to the viewport. A
     // press there must not capture a drag, swallow a row's click, page or start a repeat timer.
     let track = if style.track.thumb_only { track.child(slot.on_drag_any(on_drag)) } else { track.on_drag_any(on_drag).child(slot) };
@@ -801,9 +825,7 @@ fn attach(style: ScrollBarStyle, area: &str, key: &str, outer: El, viewport: El)
         })
         .on_hover_change_any(move |inside, tx| {
             tx.live_only();
-            if !inside {
-                left.point(None);
-            }
+            left.area_hover(inside);
         })
         .child(viewport.chain_scroll_offset(move |at| watch.follow(at, overlay)))
         .child(track)

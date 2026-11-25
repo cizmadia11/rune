@@ -10,6 +10,8 @@ pub struct InputSpec {
     pub edit: TextEdit,
     pub placeholder: String,
     pub placeholder_color: Color,
+    /// [`El::placeholder_font`]: the placeholder's own style, as CSS's `::placeholder`; else the field's.
+    pub placeholder_style: Option<TextStyle>,
     pub caret: Color,
     pub selection: Color,
     /// One unwrapped line that scrolls sideways to keep the caret visible, like `<input>`.
@@ -23,6 +25,7 @@ pub struct InputSpec {
     pub(crate) rich_style: crate::edit::RichStyle,
     pub(crate) pill_icon: Option<PillIconFn>,
     pub(crate) pill_style: Option<PillStyleFn>,
+    pub(crate) on_pill_secondary: Option<PillSecondaryFn>,
     pub(crate) access: Option<EditFn>,
     pub(crate) submit: Option<PressFn>,
     pub(crate) key: Option<InputKeyFn>,
@@ -73,6 +76,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         edit,
         placeholder: String::new(),
         placeholder_color: Color::WHITE.alpha(0.4),
+        placeholder_style: None,
         caret: Color::WHITE,
         selection: DEFAULT_SELECTION,
         single_line: false,
@@ -83,6 +87,7 @@ pub fn text_input(edit: &TextEdit, style: TextStyle) -> El {
         rich_style: crate::edit::RichStyle::default(),
         pill_icon: None,
         pill_style: None,
+        on_pill_secondary: None,
         access: None,
         submit: None,
         key: None,
