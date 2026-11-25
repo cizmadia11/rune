@@ -369,7 +369,7 @@ impl TextSystem {
         };
         let mut layout = build(&mut self.layout_cx, &mut self.font_cx, &[], &widen, &[], &[], &[]);
         // On Windows, system faces as DirectWrite picks them for each run's weight, as Chromium.
-        let system = cfg!(target_os = "windows") && !text.is_ascii();
+        let system = cfg!(target_os = "windows");
         let wanted = |at: usize| spans.iter().rev().find_map(|s| s.weight.filter(|_| span_range(s).contains(&at))).unwrap_or(style.weight);
         let weights = if system {
             system_weight::corrections(&mut self.system_faces, &mut self.font_cx, &self.font_files, &layout, wanted)

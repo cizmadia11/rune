@@ -520,3 +520,24 @@ fn run_lookups_off_a_grapheme_start_find_nothing() {
         assert!(out.is_empty());
     }
 }
+
+#[cfg(target_os = "windows")]
+#[test]
+fn ascii_and_unicode_choose_the_same_system_face() {
+    let mut system = TextSystem::new(&[], ("Segoe UI", "Consolas"));
+    let style = TextStyle::new(13.0, 500.0).family(Family::Named("Segoe UI"));
+    let ascii = system.layout_rich("Sample motion ...", &[], style, 1.0, None);
+    let unicode = system.layout_rich("Sample motion …", &[], style, 1.0, None);
+    let a = ascii.lines().next().unwrap().runs().next().unwrap();
+    let b = unicode.lines().next().unwrap().runs().next().unwrap();
+    assert_eq!(
+        (a.font().data.id(), a.font().index),
+        (b.font().data.id(), b.font().index),
+        "punctuation must not change the system face for shared ASCII text"
+    );
+    assert_eq!(
+        a.normalized_coords(),
+        b.normalized_coords(),
+        "variation coordinates must agree"
+    );
+}

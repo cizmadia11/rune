@@ -1,0 +1,1 @@
+- Windows system font weight matching now applies equally to ASCII and Unicode text, so adding punctuation such as an ellipsis cannot change the face used for an entire label.
