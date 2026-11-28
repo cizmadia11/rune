@@ -1,6 +1,7 @@
 //! Virtual row bookkeeping. Only geometry outside the mounted window is estimated.
 
 use std::cell::{Cell, Ref, RefCell};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use rune_taffy::CompactStyle;
@@ -9,21 +10,74 @@ use taffy::style::{Display, FlexDirection, FlexWrap, LengthPercentage, LengthPer
 use crate::El;
 use crate::runtime::{HashMap, HashSet};
 
-/// What a row keeps while its key stays.
-#[derive(Debug, Clone, Copy)]
-struct Row {
-    index: usize,
-    /// Its measured height, once it has been laid out.
-    height: Option<f32>,
+/// Empty slot sentinel in [`KeyIndex::slots`].
+const EMPTY_SLOT: u32 = u32::MAX;
+
+/// Open-addressed hash table mapping `VirtualList::keys[i]` -> `i` without cloning any `String`.
+/// Built lazily on the first lookup that misses the mounted window, and reused across key updates.
+#[derive(Debug, Default)]
+struct KeyIndex {
+    slots: Vec<u32>,
+    built: bool,
+}
+
+impl KeyIndex {
+    fn hash(key: &str) -> usize {
+        let mut h = rustc_hash::FxHasher::default();
+        key.hash(&mut h);
+        h.finish() as usize
+    }
+
+    fn invalidate(&mut self) {
+        self.built = false;
+    }
+
+    fn ensure(&mut self, keys: &[String]) {
+        if self.built { return; }
+        assert!(keys.len() < EMPTY_SLOT as usize, "virtual list exceeds {} rows", EMPTY_SLOT - 1);
+        let cap = (keys.len().saturating_mul(2)).next_power_of_two().max(16);
+        self.slots.clear();
+        self.slots.resize(cap, EMPTY_SLOT);
+        let mask = cap - 1;
+        for (i, key) in keys.iter().enumerate() {
+            let mut pos = Self::hash(key.as_str()) & mask;
+            loop {
+                let slot = self.slots[pos];
+                if slot == EMPTY_SLOT {
+                    self.slots[pos] = i as u32;
+                    break;
+                }
+                debug_assert_ne!(keys[slot as usize], *key, "virtual row keys must be unique");
+                pos = (pos + 1) & mask;
+            }
+        }
+        self.built = true;
+    }
+
+    fn get(&mut self, keys: &[String], key: &str) -> Option<usize> {
+        if keys.is_empty() { return None; }
+        self.ensure(keys);
+        let mask = self.slots.len() - 1;
+        let mut pos = Self::hash(key) & mask;
+        loop {
+            let slot = self.slots[pos];
+            if slot == EMPTY_SLOT { return None; }
+            let idx = slot as usize;
+            if keys[idx] == key { return Some(idx); }
+            pos = (pos + 1) & mask;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct VirtualList {
     /// Row keys in order; replace them with [`VirtualList::set_keys`].
     pub keys: Vec<String>,
-    rows: HashMap<String, Row>,
-    /// The commit each row in `keys` first appeared in.
-    born: Vec<u64>,
+    /// Measured heights for rows that have been laid out, keyed by row key. Only visited rows
+    /// live here, so a long list keeps its height map proportional to mounted rows, not total rows.
+    measured: HashMap<String, f32>,
+    /// Lazy key -> index table over `keys`, built on demand with zero `String` clones.
+    key_index: RefCell<KeyIndex>,
     /// `keys` changed since the frame began ([`VirtualList::frame_begins`]).
     keys_fresh: bool,
     /// The last change to `keys` kept a row the reader could see.
@@ -190,15 +244,25 @@ const PINNED_ROWS: usize = 32;
 
 impl VirtualList {
     pub fn height(&self, key: &str) -> f32 {
-        self.rows.get(key).and_then(|r| r.height).unwrap_or(self.estimate)
+        self.measured.get(key).copied().unwrap_or(self.estimate)
     }
 
     pub fn has(&self, key: &str) -> bool {
-        self.rows.contains_key(key)
+        self.index_of(key).is_some()
     }
 
     pub fn index_of(&self, key: &str) -> Option<usize> {
-        self.rows.get(key).map(|r| r.index)
+        let mut idx = self.key_index.borrow_mut();
+        if idx.built {
+            return idx.get(&self.keys, key);
+        }
+        // Most lookups during a frame target rows in or right beside the mounted window.
+        let lo = self.range.start.saturating_sub(8).min(self.keys.len());
+        let hi = self.range.end.saturating_add(8).min(self.keys.len());
+        if let Some(rel) = self.keys[lo..hi].iter().position(|k| k == key) {
+            return Some(lo + rel);
+        }
+        idx.get(&self.keys, key)
     }
 
     /// Whether row `i`, mounting in `commit`, skips its insertion transition. A row scrolled into
@@ -206,8 +270,8 @@ impl VirtualList {
     /// does one that a change to the rows this frame (a filter, a sort) mounts: the rows it
     /// replaces leave with their exits. Rows mounting with their transition are noted in
     /// `entering`, and the runtime lands the ones that drew out of view, so only what shows fades.
-    pub fn mounts_quietly(&mut self, i: usize, commit: u64) -> bool {
-        let quiet = self.born[i] < commit && !(self.keys_fresh && !self.shown.contains(&self.keys[i]));
+    pub fn mounts_quietly(&mut self, i: usize, _commit: u64) -> bool {
+        let quiet = !(self.keys_fresh && !self.shown.contains(&self.keys[i]));
         if !quiet { self.entering.insert(self.keys[i].clone()); }
         quiet
     }
@@ -230,31 +294,56 @@ impl VirtualList {
         keys.len() == self.keys.len() && keys.zip(&self.keys).all(|(a, b)| a == Some(b.as_str()))
     }
 
-    /// Replaces the rows. Keys that stay keep their measured height and birth; new ones are born
-    /// at `commit`. Returns the first row visible at `offset` (when given) that stays, with its
+    /// Replaces the rows. Keys that stay keep their measured height; new ones start at the
+    /// estimate. Returns the first row visible at `offset` (when given) that stays, with its
     /// top before the change, to anchor the reader to: none when no row in view stays.
-    pub fn set_keys(&mut self, keys: Vec<String>, commit: u64, offset: Option<f32>) -> Option<(String, f32)> {
-        let mut rows = HashMap::with_capacity_and_hasher(keys.len(), Default::default());
-        let mut born = Vec::with_capacity(keys.len());
-        let mut heights = Vec::with_capacity(keys.len());
-        for (index, key) in keys.iter().enumerate() {
-            let old = self.rows.get(key);
-            let height = old.and_then(|r| r.height);
-            born.push(old.map_or(commit, |r| self.born[r.index]));
-            heights.push(height.unwrap_or(self.estimate));
-            assert!(rows.insert(key.clone(), Row { index, height }).is_none(), "virtual row keys must be unique");
-        }
+    pub fn set_keys(&mut self, keys: Vec<String>, _commit: u64, offset: Option<f32>) -> Option<(String, f32)> {
+        let changed = keys != self.keys;
+        let mut next_index = KeyIndex::default();
+        let mut contains_in_new = |k: &str, hint: usize| -> bool {
+            if !next_index.built {
+                let lo = hint.saturating_sub(8).min(keys.len());
+                let hi = hint.saturating_add(9).min(keys.len());
+                if keys[lo..hi].iter().any(|nk| nk == k) {
+                    return true;
+                }
+            }
+            next_index.get(&keys, k).is_some()
+        };
         // A change that keeps none of the rows in view (a filter) leaves nothing to hold.
-        let anchor = offset.and_then(|offset| self.first_visible(offset, |k| rows.contains_key(k)))
-            .filter(|(_, top)| offset.is_some_and(|offset| *top < offset + self.viewport));
-        if keys != self.keys {
+        let anchor = offset.and_then(|offset| {
+            let sums = self.sums();
+            let first = sums[1..].partition_point(|&s| self.pad_top + s - self.gap <= offset);
+            (first..self.keys.len())
+                .find(|&i| contains_in_new(&self.keys[i], i))
+                .map(|i| (self.keys[i].clone(), self.pad_top + sums[i]))
+        }).filter(|(_, top)| offset.is_some_and(|offset| *top < offset + self.viewport));
+        if changed {
             self.keys_fresh = true;
-            self.held = if offset.is_some() { anchor.is_some() } else { self.keys.iter().any(|k| rows.contains_key(k)) };
+            self.held = if offset.is_some() {
+                anchor.is_some()
+            } else {
+                self.keys.iter().enumerate().any(|(i, k)| contains_in_new(k, i))
+            };
         }
-        self.rows = rows;
-        self.born = born;
+        self.row_heights.clear();
+        self.row_heights.resize(keys.len(), self.estimate);
+        if !self.measured.is_empty() {
+            let mut kept = HashMap::with_capacity_and_hasher(self.measured.len(), Default::default());
+            for (i, key) in keys.iter().enumerate() {
+                if let Some(&h) = self.measured.get(key.as_str()) {
+                    self.row_heights[i] = h;
+                    kept.insert(key.clone(), h);
+                }
+            }
+            self.measured = kept;
+        }
         self.keys = keys;
-        self.row_heights = heights;
+        if next_index.built {
+            *self.key_index.borrow_mut() = next_index;
+        } else {
+            self.key_index.borrow_mut().invalidate();
+        }
         self.sums_stale.set(true);
         self.reported_visible = None;
         anchor
@@ -263,7 +352,15 @@ impl VirtualList {
     pub fn set_estimate(&mut self, estimate: f32) {
         if estimate != self.estimate {
             self.estimate = estimate;
-            self.row_heights = self.keys.iter().map(|k| self.height(k)).collect();
+            self.row_heights.clear();
+            self.row_heights.resize(self.keys.len(), self.estimate);
+            if !self.measured.is_empty() {
+                for (i, k) in self.keys.iter().enumerate() {
+                    if let Some(&h) = self.measured.get(k.as_str()) {
+                        self.row_heights[i] = h;
+                    }
+                }
+            }
             self.sums_stale.set(true);
         }
     }
@@ -276,9 +373,12 @@ impl VirtualList {
     }
 
     pub fn set_height(&mut self, key: &str, height: f32) {
-        let Some(row) = self.rows.get_mut(key) else { return };
-        row.height = Some(height);
-        let i = row.index;
+        let Some(i) = self.index_of(key) else { return };
+        if let Some(slot) = self.measured.get_mut(key) {
+            *slot = height;
+        } else {
+            self.measured.insert(key.to_owned(), height);
+        }
         if self.row_heights[i] != height {
             self.row_heights[i] = height;
             self.sums_stale.set(true);
@@ -409,7 +509,7 @@ impl VirtualList {
     fn anchor_at(&self, offset: f32) -> Option<(String, f32)> {
         let range = self.visible_range(offset, false);
         let sums = self.sums();
-        range.into_iter().find(|&i| self.rows[&self.keys[i]].height.is_some())
+        range.into_iter().find(|&i| self.measured.contains_key(&self.keys[i]))
             .map(|i| (self.keys[i].clone(), self.pad_top + sums[i]))
             .or_else(|| self.first_visible(offset, |_| true))
     }
@@ -568,5 +668,41 @@ mod tests {
         v.viewport = 40.0;
         v.range = 0..10;
         assert_eq!(v.unfilled(0.0, true), 32, "a window left at the top after rows landed below it");
+    }
+
+    #[test]
+    fn incremental_key_changes_preserve_measured_heights_anchor_and_lazy_lookup() {
+        let mut v = VirtualList::default();
+        v.set_estimate(20.0);
+        v.viewport = 60.0;
+        v.set_keys((0..200).map(|i| format!("r{i}")).collect(), 1, None);
+        v.select(0.0, false, None);
+        v.set_height("r0", 35.0);
+        v.set_height("r2", 45.0);
+        v.set_height("r150", 55.0);
+        assert_eq!(v.height("r0"), 35.0);
+        assert_eq!(v.height("r1"), 20.0);
+        assert_eq!(v.index_of("r150"), Some(150));
+        assert!(v.has("r199"));
+        assert!(!v.has("missing"));
+
+        // Insert a row at index 1 (like Enter splitting a paragraph): r0 stays at 0, r2 shifts to 3,
+        // r150 shifts to 151, and measured heights + visible anchor follow their keys.
+        let mut next: Vec<String> = (0..200).map(|i| format!("r{i}")).collect();
+        next.insert(1, "r_inserted".into());
+        let anchor = v.set_keys(next, 2, Some(35.0));
+        assert_eq!(anchor, Some(("r1".into(), 35.0)));
+        assert_eq!(v.height("r0"), 35.0);
+        assert_eq!(v.height("r_inserted"), 20.0);
+        assert_eq!(v.height("r2"), 45.0);
+        assert_eq!(v.height("r150"), 55.0);
+        assert_eq!(v.index_of("r2"), Some(3));
+        assert_eq!(v.index_of("r150"), Some(151));
+
+        // Removing r2 drops its measured height so re-adding the same key starts at the estimate.
+        let without_r2: Vec<String> = v.keys.iter().filter(|k| k.as_str() != "r2").cloned().collect();
+        v.set_keys(without_r2, 3, Some(0.0));
+        assert!(!v.has("r2"));
+        assert_eq!(v.height("r2"), 20.0);
     }
 }

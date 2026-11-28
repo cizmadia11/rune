@@ -420,7 +420,7 @@ impl<S: 'static> Runtime<S> {
     }
 
     /// Scrolls the horizontal viewport latched for `gesture` (or the innermost one at (x, y)) by
-    /// `dx` points, 1:1.
+    /// `dx` points, 1:1, chaining unconsumed delta at boundaries to ancestor horizontal viewports.
     fn wheel_x(&mut self, gesture: Attempt, x: f32, y: f32, dx: f32) {
         self.release_hover_hold();
         self.dismiss_help();
@@ -429,15 +429,34 @@ impl<S: 'static> Runtime<S> {
                 self.nodes[i].scroll.is_some() && self.nodes[i].scroll_axes.x() && !self.subtree_exiting(i) && self.allowed(i)
             })
         });
-        let Some(id) = latched.or_else(|| self.scroll_at_axis(x, y, true)) else { return };
-        let Some(st) = self.scrolls.get_mut(&id) else { return };
-        let before = st.x.offset;
-        st.x.offset = (st.x.offset + st.x.toward(f64::from(dx))).clamp(0.0, st.x.max);
-        st.x.v = 0.0;
-        st.x.glide = None;
-        st.moved();
+        let Some(first) = latched.or_else(|| self.scroll_at_axis(x, y, true)) else { return };
+        let chain = self.scroll_chain_from(first, true);
+        if chain.is_empty() { return; }
+        let mut rem = f64::from(dx);
+        let mut moved_any = false;
+        for &id in &chain {
+            let Some(st) = self.scrolls.get_mut(&id) else { continue };
+            let before = st.x.offset;
+            let delta = st.x.toward(rem);
+            let after = (before + delta).clamp(0.0, st.x.max);
+            if after != before {
+                let consumed = st.x.toward(after - before);
+                st.x.offset = after;
+                st.x.v = 0.0;
+                st.x.glide = None;
+                st.moved();
+                moved_any = true;
+                self.scroll_cancels_press(id);
+                rem -= consumed;
+                if rem.abs() <= 1e-6 { break; }
+            }
+        }
+        if !moved_any && let Some(st) = self.scrolls.get_mut(&first) {
+            st.x.v = 0.0;
+            st.x.glide = None;
+            st.moved();
+        }
         log_event!(self, "wheel-x {dx:.1}");
-        if st.x.offset != before { self.scroll_cancels_press(id); }
     }
 
     /// Releases a scroll with velocity (vx, vy) in points per second (positive moves content
@@ -877,5 +896,93 @@ mod tests {
         let trackpad = PixelDelta(PhysicalPosition::new(-8.0, 20.0));
         assert_eq!(wheel_delta(trackpad, 2.0, true), (-4.0, 10.0), "a delta with a horizontal part stays as it is");
         assert!(SHIFT_TURNS_WHEEL != cfg!(target_os = "macos"));
+    }
+
+    #[test]
+    fn wheel_skips_non_overflowing_nested_scroll_container() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            let fits = crate::col().key("inner").w_full().h(200.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(crate::el().w_full().h(200.0));
+            let fits_x = crate::row().key("inner_x").w_full().h(40.0).scroll_x().child(crate::el().w(100.0).h(40.0));
+            let content = crate::col().w_full().child(fits_x).child(fits).child(crate::el().w_full().h(2000.0));
+            crate::col().key("outer").w_full().h(300.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(content)
+        }
+        let mut rt = Runtime::new((), view, (300.0, 300.0), Env::default());
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+        let id = |rt: &Runtime<()>, key: &str| rt.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap().id;
+        let (outer, inner) = (id(&rt, "outer"), id(&rt, "inner"));
+        assert_eq!(rt.scroll_at_axis(100.0, 20.0, true), None, "non-overflowing horizontal viewport is skipped");
+        assert_eq!(rt.scroll_at(100.0, 20.0), Some(outer));
+        assert_eq!(rt.scroll_at(100.0, 100.0), Some(outer), "non-overflowing vertical inner viewport is skipped");
+        rt.wheel_xy(100.0, 100.0, 0.0, -40.0);
+        assert_eq!((rt.scrolls[&outer].offset, rt.scrolls[&inner].offset), (40.0, 0.0));
+    }
+
+    #[test]
+    fn nested_vertical_scroll_consumes_mid_scroll_and_chains_at_boundaries() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            // Inner viewport: 100 pt tall with 200 pt content (max = 100).
+            let inner = crate::col().key("inner").w_full().h(100.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(crate::el().w_full().h(200.0));
+            // Outer viewport: 300 pt tall with 100 + 900 = 1000 pt content (max = 700).
+            let content = crate::col().w_full().child(inner).child(crate::el().w_full().h(900.0));
+            crate::col().key("outer").w_full().h(300.0).scroll(crate::ScrollSpec { stick_bottom: false }).child(content)
+        }
+        let mut rt = Runtime::new((), view, (300.0, 300.0), Env::default());
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+        let id = |rt: &Runtime<()>, key: &str| rt.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap().id;
+        let (outer, inner) = (id(&rt, "outer"), id(&rt, "inner"));
+
+        // Mid-scroll: inner consumes the entire delta, outer stays still.
+        rt.wheel_xy(100.0, 50.0, 0.0, -40.0);
+        assert_eq!((rt.scrolls[&inner].offset, rt.scrolls[&outer].offset), (40.0, 0.0));
+
+        // Partial boundary hit: inner has 60 pt left, delta is 90 pt -> inner hits 100, outer takes 30.
+        rt.wheel_xy(100.0, 50.0, 0.0, -90.0);
+        assert_eq!((rt.scrolls[&inner].offset, rt.scrolls[&outer].offset), (100.0, 30.0));
+
+        // Already at bottom boundary: inner consumes 0, full delta chains to outer.
+        rt.wheel_xy(100.0, 50.0, 0.0, -50.0);
+        assert_eq!((rt.scrolls[&inner].offset, rt.scrolls[&outer].offset), (100.0, 80.0));
+
+        // Precision trackpad (phased gesture) scrolling back up: inner consumes 100, remaining 30 chains to outer.
+        rt.wheel_began();
+        rt.wheel_xy(100.0, 50.0, 0.0, 130.0);
+        rt.wheel_ended();
+        assert_eq!((rt.scrolls[&inner].offset, rt.scrolls[&outer].offset), (0.0, 50.0));
+
+        // Already at top boundary: full upward delta chains to outer.
+        rt.wheel_xy(100.0, 50.0, 0.0, 20.0);
+        assert_eq!((rt.scrolls[&inner].offset, rt.scrolls[&outer].offset), (0.0, 30.0));
+    }
+
+    #[test]
+    fn horizontal_only_inner_viewport_chains_vertical_wheel_and_horizontal_boundary() {
+        fn view(_: &(), _: &mut Cx<()>) -> El {
+            // Horizontal-only inner viewport: 200 pt wide with 300 pt content (x.max = 100).
+            let inner_x = crate::row().key("inner_x").w(200.0).h(80.0).scroll_x().child(crate::el().w(300.0).h(80.0));
+            // Outer XY viewport: 300x300 with 600x1000 content (x.max = 300, y.max = 700).
+            let content = crate::col().w(600.0).child(inner_x).child(crate::el().w(600.0).h(920.0));
+            crate::col().key("outer").w_full().h(300.0).scroll_xy().child(content)
+        }
+        let mut rt = Runtime::new((), view, (300.0, 300.0), Env::default());
+        rt.frame(0.0);
+        rt.frame(1.0 / 60.0);
+        let id = |rt: &Runtime<()>, key: &str| rt.nodes.iter().find(|n| n.key.as_deref() == Some(key)).unwrap().id;
+        let (outer, inner_x) = (id(&rt, "outer"), id(&rt, "inner_x"));
+
+        // Vertical wheel over horizontal-only inner container scrolls the outer viewport vertically.
+        rt.wheel_xy(100.0, 40.0, 0.0, -50.0);
+        assert_eq!((rt.scrolls[&outer].offset, rt.scrolls[&inner_x].x.offset), (50.0, 0.0));
+
+        // Horizontal wheel mid-scroll stays inside inner_x.
+        rt.wheel_xy(100.0, 40.0, -40.0, 0.0);
+        assert_eq!((rt.scrolls[&inner_x].x.offset, rt.scrolls[&outer].x.offset), (40.0, 0.0));
+
+        // Horizontal wheel past inner_x's right boundary chains remaining delta to outer.
+        rt.wheel_began();
+        rt.wheel_xy(100.0, 40.0, -90.0, 0.0);
+        rt.wheel_ended();
+        assert_eq!((rt.scrolls[&inner_x].x.offset, rt.scrolls[&outer].x.offset), (100.0, 30.0));
     }
 }
