@@ -487,33 +487,72 @@ impl<S: 'static> Runtime<S> {
         self.scroll_at_axis(x, y, false)
     }
 
-    /// The innermost scroll viewport at (x, y) that moves on the horizontal axis or the vertical.
+    /// The innermost scroll viewport at (x, y) that can move on the horizontal axis or the vertical.
+    /// One whose content fits on that axis (`max <= 0`) is passed over for the one around it, as
+    /// Chromium skips a scroller with nothing to scroll.
     pub(super) fn scroll_at_axis(&self, x: f32, y: f32, horizontal: bool) -> Option<NodeId> {
         self.nodes
             .iter()
             .enumerate()
             .rev()
             .filter(|(i, n)| n.scroll.is_some() && n.scroll_axes.has(horizontal) && !self.subtree_exiting(*i) && self.allowed(*i))
+            .filter(|(_, n)| self.scrolls.get(&n.id).is_some_and(|st| if horizontal { st.x.max } else { st.max } > 0.0))
             .find(|(i, _)| self.node_contains(*i, x, y))
             .map(|(_, n)| n.id)
     }
 
+    /// `start` followed by each ancestor scroll viewport that can move on `horizontal`.
+    pub(super) fn scroll_chain_from(&self, start: NodeId, horizontal: bool) -> Vec<NodeId> {
+        let Some(&start_idx) = self.node_index.get(&start) else { return Vec::new() };
+        std::iter::successors(Some(start_idx), |&i| self.nodes[i].parent)
+            .filter(|&i| {
+                let n = &self.nodes[i];
+                n.scroll.is_some()
+                    && n.scroll_axes.has(horizontal)
+                    && !self.subtree_exiting(i)
+                    && self.allowed(i)
+                    && self.scrolls.get(&n.id).is_some_and(|st| if horizontal { st.x.max } else { st.max } > 0.0)
+            })
+            .map(|i| self.nodes[i].id)
+            .collect()
+    }
+
     /// Wheel or trackpad delta in points (positive `dy` moves content down, like a browser's
-    /// negative deltaY). Applied 1:1: the platform supplies its own momentum phases.
+    /// negative deltaY). Applied 1:1: the platform supplies its own momentum phases. Any delta
+    /// an inner viewport cannot consume at its boundary chains up to ancestor viewports.
     pub fn wheel(&mut self, x: f32, y: f32, dy: f32) {
         self.release_hover_hold();
         self.drop_scroll_holds();
         self.dismiss_help();
-        let Some(id) = self.scroll_at(x, y) else { return };
-        let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
-        if let Some(st) = self.scrolls.get_mut(&id) {
+        let Some(first) = self.scroll_at(x, y) else { return };
+        let chain = self.scroll_chain_from(first, false);
+        if chain.is_empty() { return; }
+        let mut rem = f64::from(dy);
+        let mut moved_any = false;
+        for &id in &chain {
+            let stick = self.node_index.get(&id).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
+            let Some(st) = self.scrolls.get_mut(&id) else { continue };
             let before = st.offset;
-            st.offset = (st.offset - f64::from(dy)).clamp(0.0, st.max);
-            st.moved();
-            st.land(stick);
-            log_event!(self, "wheel {dy:.1}");
-            if st.offset != before { self.scroll_cancels_press(id); }
+            let after = (before - rem).clamp(0.0, st.max);
+            if after != before {
+                let consumed = before - after;
+                st.offset = after;
+                st.moved();
+                st.land(stick);
+                moved_any = true;
+                self.scroll_cancels_press(id);
+                rem -= consumed;
+                if rem.abs() <= 1e-6 { break; }
+            }
         }
+        if !moved_any {
+            let stick = self.node_index.get(&first).and_then(|&i| self.nodes[i].scroll).is_some_and(|s| s.stick_bottom);
+            if let Some(st) = self.scrolls.get_mut(&first) {
+                st.moved();
+                st.land(stick);
+            }
+        }
+        log_event!(self, "wheel {dy:.1}");
     }
 
     /// Releases a scroll with `velocity` (points per second, positive moves content down);

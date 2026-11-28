@@ -105,10 +105,32 @@ pub(crate) fn warnings(root: &El) -> Vec<String> {
     find(root, root_path(root)).into_iter().map(|d| d.message).collect()
 }
 
+/// Whether all string keys in `keys` are distinct, using a zero-allocation `FxHash` check
+/// (matching [`unique`]): a hash collision only sends the caller to the exact rename path.
+fn unique_strings(keys: &[&mut String]) -> bool {
+    let n = keys.len();
+    if n < 2 { return true; }
+    if n <= 8 {
+        return keys.iter().enumerate().all(|(i, a)| keys[i + 1..].iter().all(|b| a.as_str() != b.as_str()));
+    }
+    thread_local! { static HASHES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) }; }
+    HASHES.with_borrow_mut(|hashes| {
+        hashes.clear();
+        hashes.extend(keys.iter().map(|k| {
+            let mut h = rustc_hash::FxHasher::default();
+            k.as_str().hash(&mut h);
+            h.finish()
+        }));
+        hashes.sort_unstable();
+        hashes.windows(2).all(|w| w[0] != w[1])
+    })
+}
+
 /// Renames each later copy of a key `key#dup1`, `key#dup2`, ... in order, skipping names
 /// already taken, so the first keeps its key. Returns each renamed index with its old key.
 pub(crate) fn rename_duplicates<'a>(keys: impl Iterator<Item = &'a mut String>) -> Vec<(usize, String)> {
     let mut keys: Vec<&mut String> = keys.collect();
+    if unique_strings(&keys) { return Vec::new(); }
     let mut taken: HashSet<String> = keys.iter().map(|k| k.to_string()).collect();
     let mut kept: HashSet<String> = HashSet::new();
     let mut renamed = Vec::new();
@@ -120,6 +142,30 @@ pub(crate) fn rename_duplicates<'a>(keys: impl Iterator<Item = &'a mut String>) 
         renamed.push((i, std::mem::replace(*key, name)));
     }
     renamed
+}
+
+/// Slice variant of [`rename_duplicates`] that skips allocating a pointer vector when all keys
+/// are unique (the common case for long virtual lists).
+pub(crate) fn rename_duplicate_keys(keys: &mut [String]) -> Vec<(usize, String)> {
+    let n = keys.len();
+    if n < 2 { return Vec::new(); }
+    let distinct = if n <= 8 {
+        keys.iter().enumerate().all(|(i, a)| keys[i + 1..].iter().all(|b| a != b))
+    } else {
+        thread_local! { static HASHES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) }; }
+        HASHES.with_borrow_mut(|hashes| {
+            hashes.clear();
+            hashes.extend(keys.iter().map(|k| {
+                let mut h = rustc_hash::FxHasher::default();
+                k.as_str().hash(&mut h);
+                h.finish()
+            }));
+            hashes.sort_unstable();
+            hashes.windows(2).all(|w| w[0] != w[1])
+        })
+    };
+    if distinct { return Vec::new(); }
+    rename_duplicates(keys.iter_mut())
 }
 
 /// Makes sibling keys unique so the layout tree never sees two siblings share a node. The first

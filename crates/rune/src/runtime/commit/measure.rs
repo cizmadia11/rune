@@ -347,7 +347,7 @@ impl<S: 'static> Measurement<'_, S> {
             };
             // Rows sharing a key would share a height and a node: rename the later ones, as
             // the view's siblings are, so the list still lays out.
-            let renamed = crate::input::key_diagnostics::rename_duplicates(keys.iter_mut());
+            let renamed = crate::input::key_diagnostics::rename_duplicate_keys(&mut keys);
             if !renamed.is_empty() {
                 let duplicates: Vec<_> = renamed.iter().map(|(_, key)| {
                     let key = key.clone();
@@ -367,8 +367,9 @@ impl<S: 'static> Measurement<'_, S> {
             // would scroll the entire list a second time. Inserts/removals still preserve
             // the reader's anchor, and so does a reorder that lands at once.
             let slides = !tx.commit.snaps() && !tx.commit.lands() && !tx.relayout && !self.reduced_motion;
-            let reorder = keys.len() == v.keys.len() && keys.iter().all(|key| v.has(key))
-                && (slides || list.is_some_and(|list| self.nodes.iter().any(|n| n.vis.offset != [0.0; 2] && n.parent == Some(list))));
+            let reorder = keys.len() == v.keys.len()
+                && (slides || list.is_some_and(|list| self.nodes.iter().any(|n| n.vis.offset != [0.0; 2] && n.parent == Some(list))))
+                && keys.iter().all(|key| v.has(key));
             v.set_keys(keys, self.commits, (!pinned && !reorder).then_some(offset))
         };
         v.anchor = anchor;
